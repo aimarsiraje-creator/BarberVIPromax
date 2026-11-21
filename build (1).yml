@@ -1,0 +1,107 @@
+name: Build BARBER VIPROMAX apps and website
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'barber_vipromax*.zip'
+      - '.github/workflows/*.yml'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Unpack newest project zip
+        run: |
+          ZIP=$(for f in barber_vipromax*.zip; do echo "$(git log -1 --format=%ct -- "$f") $f"; done | sort -n | tail -1 | cut -d' ' -f2-)
+          echo "Using: $ZIP"
+          unzip -q "$ZIP"
+
+      - name: Put Supabase keys
+        working-directory: barber_vipromax
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          sed -i "s|PUT_YOUR_SUPABASE_URL|${SUPABASE_URL}|; s|PUT_YOUR_SUPABASE_ANON_KEY|${SUPABASE_ANON_KEY}|" packages/core/lib/core.dart
+
+      - name: Prepare the three apps
+        working-directory: barber_vipromax
+        run: bash setup.sh
+
+      - name: Build Android APKs
+        working-directory: barber_vipromax
+        run: |
+          mkdir -p out
+          (cd apps/customer && flutter build apk --release)
+          (cd apps/barber && flutter build apk --release)
+          (cd apps/owner && flutter build apk --release)
+          cp apps/customer/build/app/outputs/flutter-apk/app-release.apk out/1-BarberVIPROMAX-Customer.apk
+          cp apps/barber/build/app/outputs/flutter-apk/app-release.apk out/2-BarberVIPROMAX-Barber.apk
+          cp apps/owner/build/app/outputs/flutter-apk/app-release.apk out/3-BarberVIPROMAX-Owner.apk
+
+      - name: Publish APKs as a release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apps-${{ github.run_number }}
+          name: BARBER VIPROMAX apps (build ${{ github.run_number }})
+          files: barber_vipromax/out/*.apk
+
+      - name: Assemble the website (landing page + iPhone web apps + APK)
+        working-directory: barber_vipromax
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          rm -rf site && mkdir -p site
+          cp -r website/. site/
+          mkdir -p site/downloads
+          cp out/1-BarberVIPROMAX-Customer.apk site/downloads/BarberVIPROMAX.apk
+          sed -i "s|PUT_YOUR_SUPABASE_URL|${SUPABASE_URL}|; s|PUT_YOUR_SUPABASE_ANON_KEY|${SUPABASE_ANON_KEY}|" site/shared/config.js
+          SIZE=$(du -h site/downloads/BarberVIPROMAX.apk | cut -f1)
+          sed -i "s|apkSize: ''|apkSize: '${SIZE}B'|" site/config.js
+          pip install "qrcode[pil]"
+          python3 - <<'PY'
+          import os, qrcode
+          q = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H, box_size=12, border=2)
+          q.add_data(os.environ['SITE_URL']); q.make(fit=True)
+          q.make_image(fill_color='#06201a', back_color='#f4ecd9').save('site/assets/qr.png')
+          PY
+          echo "Website URL: $SITE_URL"
+          echo "Customer web app: ${SITE_URL}app/"
+          echo "Barber web app: ${SITE_URL}barber/"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: barber_vipromax/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
